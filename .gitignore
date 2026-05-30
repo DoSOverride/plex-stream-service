@@ -1,0 +1,8 @@
+run.bat
+*.log
+stream-state.json
+__pycache__/
+*.pyc
+.venv/
+.idea/
+.vscode/

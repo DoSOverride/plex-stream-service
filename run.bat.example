@@ -1,0 +1,7 @@
+@echo off
+REM Copy this to run.bat and fill in your MDBList API key (https://mdblist.com).
+REM Radarr API key is auto-read from C:\ProgramData\Radarr\config.xml -- override
+REM with `set RADARR_KEY=...` if Radarr lives elsewhere.
+set MDBLIST_KEY=REPLACE_WITH_YOUR_MDBLIST_API_KEY
+set TOPN=5
+"C:\Users\%USERNAME%\AppData\Local\Programs\Python\Python312\python.exe" "%~dp0stream-service.py" >> "%~dp0run.log" 2>&1
