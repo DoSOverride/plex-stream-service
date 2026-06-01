@@ -124,19 +124,27 @@ def main():
     movies = http(f"{RADARR}/movie")
     by_tmdb = {m["tmdbId"]: m for m in movies}
 
-    # free space guard
-    rf = next((r for r in http(f"{RADARR}/rootfolder") if r["path"].startswith("M")), None)
-    free_gb = (rf["freeSpace"]/1e9) if rf else 999
+    # Pick the root folder with the most free space each run -- avoids piling
+    # everything onto one drive (e.g. M:) until it fills up. Skip adds entirely
+    # if no root has the minimum free space.
+    MIN_FREE_GB = 25
+    roots = [r for r in http(f"{RADARR}/rootfolder") if r.get("accessible", True)]
+    roots.sort(key=lambda r: r["freeSpace"], reverse=True)
+    if not roots:
+        log("ABORT: no accessible root folders"); return
+    root = roots[0]
+    chosen_path = root["path"]; free_gb = root["freeSpace"]/1e9
+    log(f"chose root {chosen_path} ({free_gb:.0f}GB free) from {len(roots)} candidates")
 
     # 3. ADD new charting movies we don't already have
     added = 0; skipped_have = 0
     for tmdb, c in charting.items():
         if tmdb in by_tmdb:
             skipped_have += 1; continue
-        if free_gb < 25:
-            log(f"SKIP add (low space {free_gb:.0f}GB): {c['title']}"); continue
+        if free_gb < MIN_FREE_GB:
+            log(f"SKIP add (low space {free_gb:.0f}GB everywhere): {c['title']}"); continue
         body = {"tmdbId": tmdb, "title": c["title"], "qualityProfileId": qp,
-                "rootFolderPath": ROOT, "monitored": True, "minimumAvailability": "released",
+                "rootFolderPath": chosen_path, "monitored": True, "minimumAvailability": "released",
                 "tags": [tag_id] if tag_id and tag_id > 0 else [],
                 "addOptions": {"searchForMovie": True}}
         if DRY:
@@ -174,7 +182,7 @@ def main():
     try: plex_collection_sync(set(charting))
     except Exception as e: log(f"WARN: plex sync error: {e}")
 
-    log(f"SUMMARY: charting={len(charting)} added={added} already_had={skipped_have} removed={removed} M_free={free_gb:.0f}GB dry={DRY}")
+    log(f"SUMMARY: charting={len(charting)} added={added} already_had={skipped_have} removed={removed} root={chosen_path} free_after={free_gb:.0f}GB dry={DRY}")
 
 if __name__ == "__main__":
     main()
