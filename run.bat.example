@@ -3,7 +3,11 @@ REM Copy this to run.bat and fill in your MDBList API key (https://mdblist.com).
 REM Radarr API key is auto-read from C:\ProgramData\Radarr\config.xml -- override
 REM with `set RADARR_KEY=...` if Radarr lives elsewhere.
 REM NTFY_TOPIC: pick a random hard-to-guess string, then subscribe at https://ntfy.sh/<your_topic> on phone.
+REM TAUTULLI_KEY (optional): from Tautulli > Settings > Web Interface > API. Enables
+REM   watch-aware pruning: stream-tagged movies you watched get deleted 7d after,
+REM   not the full 30d grace.
 set MDBLIST_KEY=REPLACE_WITH_YOUR_MDBLIST_API_KEY
 set TOPN=8
 set NTFY_TOPIC=REPLACE_WITH_RANDOM_TOPIC
+set TAUTULLI_KEY=
 "C:\Users\%USERNAME%\AppData\Local\Programs\Python\Python312\python.exe" "%~dp0stream-service.py" >> "%~dp0run.log" 2>&1

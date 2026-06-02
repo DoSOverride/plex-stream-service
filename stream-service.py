@@ -35,6 +35,8 @@ LISTS = {
 # Prime Video deliberately excluded -- user already pays for Prime.
 QUALITY_FALLBACK_DAYS = 7   # if no grab after N days, drop 1080p -> 720p
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC")  # set in run.bat; if unset, push is no-op
+TAUTULLI_KEY = os.environ.get("TAUTULLI_KEY")  # optional; enables watch-aware pruning
+WATCHED_GRACE_DAYS = 7   # if user watched a stream-tagged title, drop grace from 30d -> this
 
 def log(m):
     line = f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} {m}"
@@ -124,6 +126,31 @@ def plex_collection_sync(charting):
                 log(f"WARN: plex tag rk={rk}: {e}")
     log(f"plex collection '{COLL_NAME}': {synced} charting titles present in Plex")
     _plex_promote_collection(tok, PLEX_MOVIES_SID, COLL_NAME)
+
+def watched_tmdb_ids():
+    """Return {tmdb_id: last_watched_unix_ts} for all fully-watched movies
+    in Tautulli history. Used to accelerate grace-delete on stream-tagged
+    titles the user has actually finished."""
+    if not TAUTULLI_KEY: return {}
+    try:
+        url = f"http://localhost:8181/api/v2?apikey={TAUTULLI_KEY}&cmd=get_history&length=500&media_type=movie"
+        with urllib.request.urlopen(url, timeout=30) as r:
+            d = json.loads(r.read().decode())
+        rows = d.get("response", {}).get("data", {}).get("data", [])
+        out = {}
+        for r in rows:
+            if r.get("watched_status") != 1: continue
+            guid = r.get("guid", "") or ""
+            m = re.search(r"tmdb://(\d+)", guid)
+            if not m: continue
+            tmdb = int(m.group(1))
+            ts = r.get("stopped") or r.get("started") or 0
+            if tmdb not in out or ts > out[tmdb]:
+                out[tmdb] = ts
+        log(f"tautulli: {len(out)} watched movies in last 500 history rows")
+        return out
+    except Exception as e:
+        log(f"WARN: tautulli fetch failed: {e}"); return {}
 
 def ntfy_push(added_titles):
     """Best-effort phone notification when titles are added.
@@ -235,18 +262,29 @@ def main():
         state = json.load(open(STATE_FILE))
     now = datetime.datetime.now()
     for t in [str(x) for x in charting]:
-        state[t] = now.isoformat()  # refresh last-seen for charting titles
+        state[t] = now.isoformat()
+    watched = watched_tmdb_ids()   # tmdb_id -> last_watched_unix_ts
     removed = 0
     for m in movies:
-        if tag_id not in m.get("tags", []): continue   # not ours -> never touch
-        tmdb = str(m["tmdbId"])
-        if int(tmdb) in charting: continue              # still charting -> keep
+        if tag_id not in m.get("tags", []): continue
+        tmdb_i = m["tmdbId"]; tmdb = str(tmdb_i)
+        if tmdb_i in charting: continue
         last = state.get(tmdb)
         age = (now - datetime.datetime.fromisoformat(last)).days if last else 999
-        if age >= GRACE_DAYS:
-            if DRY: log(f"[dry] REMOVE {m['title']} (off-chart {age}d)")
+        # If user finished watching it, shorten grace: must be both >=7d since
+        # off-chart AND >=7d since watch, so a recent watch doesn't trigger.
+        if tmdb_i in watched:
+            watch_age = (now.timestamp() - watched[tmdb_i]) / 86400
+            if age < WATCHED_GRACE_DAYS or watch_age < WATCHED_GRACE_DAYS: continue
+            reason = f"watched {watch_age:.0f}d ago, off-chart {age}d"
+            do_remove = True
+        else:
+            do_remove = age >= GRACE_DAYS
+            reason = f"off-chart {age}d"
+        if do_remove:
+            if DRY: log(f"[dry] REMOVE {m['title']} ({reason})")
             else:
-                try: http(f"{RADARR}/movie/{m['id']}?deleteFiles=true&addImportExclusion=false", "DELETE"); log(f"REMOVED {m['title']} (off-chart {age}d)")
+                try: http(f"{RADARR}/movie/{m['id']}?deleteFiles=true&addImportExclusion=false", "DELETE"); log(f"REMOVED {m['title']} ({reason})")
                 except Exception as e: log(f"DELFAIL {m['title']}: {e}"); continue
             state.pop(tmdb, None); removed += 1
 
