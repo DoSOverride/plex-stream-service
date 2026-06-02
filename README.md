@@ -1,29 +1,44 @@
 # plex-stream-service
 
-A tiny "mini Netflix" for Plex: auto-downloads the Top-N movies trending on
-Netflix / Apple TV+ / Paramount+ / HBO Max / Crave into Radarr at 1080p, drops
-them into a self-refreshing **🔥 Streaming Top 10** Plex collection, and
-auto-deletes them 30 days after they fall off every chart.
+A tiny "mini Netflix" for Plex: auto-downloads what's currently trending on
+Netflix / Apple TV+ / Paramount+ / HBO Max / Crave / Disney+ into Radarr
+(movies) and Sonarr (TV), drops them into self-refreshing **🔥 Streaming
+Top 10** Plex rows, and auto-deletes them 30 days after they fall off every
+chart.
 
-Single Python script. No Docker. No Maintainerr. Stdlib only.
+Two stdlib-only Python scripts. No Docker. No Maintainerr. No `pip install`.
 
 ## What it does
 
-On every run:
+Two scripts, same shape:
 
-1. Pulls the current Top-N chart from each streaming service via
+- `stream-service.py` — movies, via Radarr
+- `stream-service-tv.py` — TV series, via Sonarr (monitors latest season only)
+
+On every run, each one:
+
+1. Pulls the current Top-N chart for each streaming service via
    [MDBList](https://mdblist.com) public lists.
-2. Adds anything not already in Radarr at 1080p, tagged `stream`, and starts the
-   search.
-3. Records "last seen on a chart" per movie. Anything tagged `stream` that has
-   been off **every** chart for 30+ days is deleted (file + Radarr entry).
-4. Syncs the matching movies in Plex into a collection called
-   `🔥 Streaming Top 10` so they show up as a row on your home screen.
+2. Adds anything not already present to Radarr/Sonarr at 1080p, tagged
+   `stream` / `stream-tv`, and starts the indexer search.
+3. Records "last seen on a chart" per title. Anything tagged that has been
+   off **every** chart for 30+ days is deleted (files + library entry).
+4. Picks whichever root folder has the most free space each run (so it
+   spreads across drives instead of filling one).
+5. (Movies only) If a 1080p title still has no file after 7 days, drops it to
+   720p and re-searches — keeps brand-new releases from getting stuck.
+6. Syncs the present-in-Plex titles into a collection called
+   `🔥 Streaming Top 10` (movies) or `🔥 Streaming Top 10 TV` (series), and
+   **pins it to your Plex home row** automatically.
+7. (Optional) Sends a phone push notification via [ntfy.sh](https://ntfy.sh)
+   listing what was just added.
 
-It only ever touches movies it added itself (Radarr tag `stream`) — your
-existing library is safe.
+It only ever touches titles it added itself (tag `stream` / `stream-tv`) —
+your existing library is safe.
 
 ## Default chart sources
+
+Movies:
 
 | Service     | MDBList list id |
 | ----------- | --------------- |
@@ -32,33 +47,49 @@ existing library is safe.
 | Paramount+  | 58487           |
 | HBO Max     | 171401          |
 | Crave       | 165305          |
+| Disney+     | 3095            |
 
-Edit the `LISTS` dict in `stream-service.py` to add/remove services or swap in
-different lists.
+TV:
+
+| Service     | MDBList list id |
+| ----------- | --------------- |
+| Netflix     | 3082            |
+| HBO Max     | 3086            |
+| Disney+     | 3090            |
+| Apple TV+   | 7995            |
+| Paramount+  | 32020           |
+
+Edit the `LISTS` dict in either script to add/remove services or swap lists.
 
 ## Requirements
 
 - Windows (paths are Windows-flavored — easy to port to Linux)
 - Python 3.10+ (stdlib only, no `pip install` needed)
-- A running [Radarr](https://radarr.video) on `http://localhost:7878`
+- [Radarr](https://radarr.video) on `http://localhost:7878` (for movies)
+- [Sonarr](https://sonarr.tv) on `http://localhost:8989` (for TV)
 - A free [MDBList](https://mdblist.com) account for an API key
-- Plex Media Server (optional, only needed for the collection sync)
+- Plex Media Server (optional, only needed for collection sync + Home pinning)
+- A free [ntfy.sh](https://ntfy.sh) topic + phone app (optional, for push)
 
 ## Setup
 
 1. Clone or download this repo somewhere, e.g. `C:\arr-tools\stream-service\`.
-2. `copy run.bat.example run.bat`
-3. Open `run.bat` and replace `REPLACE_WITH_YOUR_MDBLIST_API_KEY` with your
-   MDBList key.
-4. Open `stream-service.py` and tweak:
-   - `ROOT` — your Radarr movies root folder (default `M:\media\Movies`)
+2. `copy run.bat.example run.bat` and `copy run-tv.bat.example run-tv.bat`.
+3. Open each `.bat` and fill in:
+   - `MDBLIST_KEY` — from your MDBList account
+   - `NTFY_TOPIC` — any random hard-to-guess string (e.g. `plex-stream-yourname-abc123`).
+     Then on your phone install ntfy from the App Store / Play Store and
+     subscribe to that exact topic name. Leave blank to skip notifications.
+4. Open each script and tweak if desired:
    - `LISTS` — which streaming services to track
+   - `TOPN` / `TOPN_TV` — depth per service (default 8 movies / 5 TV)
    - `GRACE_DAYS` — how long off-chart titles stick around (default 30)
-5. Schedule it. Task Scheduler → daily, action: `run.bat`.
+   - `QUALITY_FALLBACK_DAYS` — movies only (default 7)
+5. Schedule them. Task Scheduler → daily, actions: `run.bat` and `run-tv.bat`.
 
-The script reads the Radarr API key directly from
-`C:\ProgramData\Radarr\config.xml`. If your Radarr lives elsewhere, set
-`RADARR_KEY=...` in `run.bat` to override.
+The scripts read Radarr/Sonarr API keys directly from
+`C:\ProgramData\Radarr\config.xml` and `C:\ProgramData\Sonarr\config.xml`.
+If yours live elsewhere, set `RADARR_KEY=...` / `SONARR_KEY=...` in the bat.
 
 ## Dry run
 
@@ -66,24 +97,29 @@ The script reads the Radarr API key directly from
 set DRY_RUN=1
 set MDBLIST_KEY=your_key_here
 python stream-service.py
+python stream-service-tv.py
 ```
 
-Logs every add/remove it *would* do without touching Radarr or Plex.
+Logs every add/remove it *would* do without touching Radarr, Sonarr, Plex,
+or ntfy.
 
 ## Free-space guard
 
-If the movies root has less than 25 GB free, new adds are skipped (existing
-downloads keep going, grace deletes keep running). Tune `free_gb < 25` in
-`main()` if you want a different threshold.
+If no root folder has at least 25 GB free, new adds are skipped (existing
+downloads keep going, grace deletes keep running). Tune `MIN_FREE_GB` in
+`main()` of either script to change the threshold.
 
 ## Notes
 
-- Radarr's own "remove from list when off-list" deletes instantly. This script
-  exists because you want a grace period.
-- The Plex collection isn't pinned to the home row automatically — tap
-  **Pin to Home** on the collection once and you're done.
+- Radarr/Sonarr's own "remove from list when off-list" deletes instantly.
+  These scripts exist because you want a grace period.
+- The Plex collection gets pinned to the Home row automatically — no manual
+  step required.
+- TV series add with `monitor: latestSeason` so a trending Ted Lasso doesn't
+  pull all 3 seasons unprompted. Change to `"all"` in
+  `stream-service-tv.py` if you want everything.
 - New 2026 releases lag the script until a 1080p torrent exists on your
-  indexers. Expected.
+  indexers. The 7-day 1080p→720p fallback (movies only) helps with this.
 
 ## License
 

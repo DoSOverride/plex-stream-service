@@ -23,14 +23,18 @@ STATE_FILE = os.path.join(HERE, "stream-state.json")
 LOG_FILE = os.path.join(HERE, "stream-service.log")
 
 # service -> (mdblist list id, how many top titles to keep)
-TOPN = int(os.environ.get("TOPN", "5"))   # per-service depth; bump to 10 when space allows
+TOPN = int(os.environ.get("TOPN", "8"))   # per-service depth
 LISTS = {
     "Netflix":    (61756, TOPN),
     "Apple TV+":  (59152, TOPN),
     "Paramount+": (58487, TOPN),
     "HBO Max":    (171401, TOPN),
     "Crave":      (165305, TOPN),
+    "Disney+":    (3095,  TOPN),   # Disney+ Movies by garycrawfordgc -- live, real-trending
 }
+# Prime Video deliberately excluded -- user already pays for Prime.
+QUALITY_FALLBACK_DAYS = 7   # if no grab after N days, drop 1080p -> 720p
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC")  # set in run.bat; if unset, push is no-op
 
 def log(m):
     line = f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} {m}"
@@ -60,20 +64,44 @@ def plex_token():
     except Exception as e:
         log(f"WARN: no Plex token: {e}"); return None
 
+PLEX_BASE = "http://localhost:32400"
+COLL_NAME = "\U0001f525 Streaming Top 10"   # avoid raw emoji literal in source file
+PLEX_MOVIES_SID = "1"
+
+def _plex_promote_collection(tok, sid, name):
+    """Pin the named collection to the Plex home row (promotedToOwnHome=1).
+    Idempotent -- safe to call every run. Skipped silently if collection not yet
+    created (will exist after first plex_collection_sync that has matches)."""
+    import xml.etree.ElementTree as ET
+    try:
+        with urllib.request.urlopen(f"{PLEX_BASE}/library/sections/{sid}/collections?X-Plex-Token={tok}", timeout=30) as r:
+            root = ET.fromstring(r.read())
+    except Exception as e:
+        log(f"WARN: plex collections fetch failed: {e}"); return
+    rk = None
+    for c in root.findall("Directory"):
+        if c.get("title") == name: rk = c.get("ratingKey"); break
+    if not rk:
+        log(f"plex pin: collection '{name}' not in Plex yet -- will pin once it has titles"); return
+    url = f"{PLEX_BASE}/library/metadata/{rk}/prefs?promotedToOwnHome=1&promotedToSharedHome=1&X-Plex-Token={tok}"
+    if DRY: log(f"[dry] plex pin collection rk={rk} -> Home"); return
+    try:
+        urllib.request.urlopen(urllib.request.Request(url, method="PUT"), timeout=15)
+        log(f"plex pin: '{name}' pinned to Home (rk={rk})")
+    except Exception as e:
+        log(f"WARN: plex pin failed: {e}")
+
 def plex_collection_sync(charting):
-    """Put every charting movie that exists in Plex into the '🔥 Streaming Top 10'
-    collection. Movies leave the collection naturally when grace-delete removes them."""
+    """Put every charting movie present in Plex into COLL_NAME, then pin the
+    collection to Home. Movies leave naturally when grace-delete removes them."""
     import xml.etree.ElementTree as ET
     tok = plex_token()
     if not tok: return
-    COLL = "🔥 Streaming Top 10"; SID = "1"
-    base = "http://localhost:32400"
     try:
-        with urllib.request.urlopen(f"{base}/library/sections/{SID}/all?includeGuids=1&X-Plex-Token={tok}", timeout=60) as r:
+        with urllib.request.urlopen(f"{PLEX_BASE}/library/sections/{PLEX_MOVIES_SID}/all?includeGuids=1&X-Plex-Token={tok}", timeout=60) as r:
             root = ET.fromstring(r.read())
     except Exception as e:
         log(f"WARN: plex fetch failed: {e}"); return
-    # map tmdbId -> ratingKey
     tmdb_to_rk = {}
     for v in root.findall("Video"):
         rk = v.get("ratingKey")
@@ -84,9 +112,9 @@ def plex_collection_sync(charting):
     synced = 0
     for tmdb in charting:
         rk = tmdb_to_rk.get(tmdb)
-        if not rk: continue   # not downloaded into Plex yet -> picked up a later run
-        url = (f"{base}/library/sections/{SID}/all?type=1&id={rk}"
-               f"&collection%5B0%5D.tag.tag={urllib.parse.quote(COLL)}&collection.locked=1&X-Plex-Token={tok}")
+        if not rk: continue
+        url = (f"{PLEX_BASE}/library/sections/{PLEX_MOVIES_SID}/all?type=1&id={rk}"
+               f"&collection%5B0%5D.tag.tag={urllib.parse.quote(COLL_NAME)}&collection.locked=1&X-Plex-Token={tok}")
         if DRY:
             log(f"[dry] plex collection += ratingKey {rk}")
         else:
@@ -94,7 +122,25 @@ def plex_collection_sync(charting):
                 urllib.request.urlopen(urllib.request.Request(url, method="PUT"), timeout=30); synced += 1
             except Exception as e:
                 log(f"WARN: plex tag rk={rk}: {e}")
-    log(f"plex collection '{COLL}': {synced} charting titles present in Plex")
+    log(f"plex collection '{COLL_NAME}': {synced} charting titles present in Plex")
+    _plex_promote_collection(tok, PLEX_MOVIES_SID, COLL_NAME)
+
+def ntfy_push(added_titles):
+    """Best-effort phone notification when titles are added.
+    Set NTFY_TOPIC env var to a topic you've subscribed to at ntfy.sh on your
+    phone. No-op if NTFY_TOPIC is unset or if DRY_RUN."""
+    if DRY: log(f"[dry] would push {len(added_titles)} titles to ntfy"); return
+    if not NTFY_TOPIC or not added_titles: return
+    msg = f"+{len(added_titles)}: " + ", ".join(added_titles)[:200]
+    try:
+        req = urllib.request.Request(
+            f"https://ntfy.sh/{NTFY_TOPIC}",
+            data=msg.encode("utf-8"),
+            headers={"Title": "Streaming Top 10", "Tags": "fire,movie_camera", "Priority": "default"})
+        urllib.request.urlopen(req, timeout=10)
+        log(f"ntfy push sent to topic '{NTFY_TOPIC}'")
+    except Exception as e:
+        log(f"WARN: ntfy push failed: {e}")
 
 def main():
     # 1. gather currently-charting movies (tmdb -> {title, year, services[]})
@@ -136,8 +182,10 @@ def main():
     chosen_path = root["path"]; free_gb = root["freeSpace"]/1e9
     log(f"chose root {chosen_path} ({free_gb:.0f}GB free) from {len(roots)} candidates")
 
+    qp_720 = next((p["id"] for p in profiles if re.search(r"720", p["name"])), None)
+
     # 3. ADD new charting movies we don't already have
-    added = 0; skipped_have = 0
+    added = 0; skipped_have = 0; added_titles = []
     for tmdb, c in charting.items():
         if tmdb in by_tmdb:
             skipped_have += 1; continue
@@ -153,6 +201,33 @@ def main():
             try: http(f"{RADARR}/movie", "POST", body); log(f"ADDED {c['title']} ({c['year']}) <- {','.join(c['svcs'])}")
             except Exception as e: log(f"ADDFAIL {c['title']}: {e}"); continue
         added += 1; free_gb -= 5
+        added_titles.append(c['title'])
+
+    # 3b. QUALITY FALLBACK: stream-tagged movies still missing after 7 days at
+    # 1080p drop to 720p. Lets brand-new releases trickle in once any quality
+    # is available instead of waiting forever for a 1080p torrent.
+    fallback_count = 0
+    if qp_720 and qp_720 != qp:
+        for m in movies:
+            if tag_id not in m.get("tags", []): continue
+            if m.get("movieFileId", 0) > 0: continue          # already have file
+            if m.get("qualityProfileId") != qp: continue      # not on 1080p
+            try:
+                added_dt = datetime.datetime.fromisoformat(m["added"].rstrip("Z"))
+            except Exception:
+                continue
+            if (datetime.datetime.utcnow() - added_dt).days < QUALITY_FALLBACK_DAYS: continue
+            if DRY: log(f"[dry] FALLBACK {m['title']} 1080p -> 720p"); fallback_count += 1; continue
+            try:
+                http(f"{RADARR}/movie/editor", "PUT",
+                     {"movieIds": [m["id"]], "qualityProfileId": qp_720})
+                http(f"{RADARR}/command", "POST",
+                     {"name": "MoviesSearch", "movieIds": [m["id"]]})
+                log(f"FALLBACK {m['title']} 1080p -> 720p ({QUALITY_FALLBACK_DAYS}d no grab)")
+                fallback_count += 1
+            except Exception as e:
+                log(f"FALLBACKFAIL {m['title']}: {e}")
+    if fallback_count: log(f"quality fallback: {fallback_count} titles dropped to 720p")
 
     # 4. STATE + GRACE-DELETE (only movies tagged 'stream' = ones we added)
     state = {}
@@ -178,9 +253,14 @@ def main():
     if not DRY:
         json.dump(state, open(STATE_FILE, "w"), indent=1)
 
-    # 5. Plex: keep the "🔥 Streaming Top 10" collection in sync
+    # 5. Plex: keep the collection in sync + pin to Home
     try: plex_collection_sync(set(charting))
     except Exception as e: log(f"WARN: plex sync error: {e}")
+
+    # 6. Push notification on adds
+    if added_titles:
+        try: ntfy_push(added_titles)
+        except Exception as e: log(f"WARN: ntfy push error: {e}")
 
     log(f"SUMMARY: charting={len(charting)} added={added} already_had={skipped_have} removed={removed} root={chosen_path} free_after={free_gb:.0f}GB dry={DRY}")
 

@@ -1,0 +1,9 @@
+@echo off
+REM Copy this to run-tv.bat and fill in your MDBList API key (https://mdblist.com).
+REM Sonarr API key is auto-read from C:\ProgramData\Sonarr\config.xml -- override
+REM with `set SONARR_KEY=...` if Sonarr lives elsewhere.
+REM NTFY_TOPIC: pick a random hard-to-guess string, then subscribe at https://ntfy.sh/<your_topic> on phone.
+set MDBLIST_KEY=REPLACE_WITH_YOUR_MDBLIST_API_KEY
+set TOPN_TV=5
+set NTFY_TOPIC=REPLACE_WITH_RANDOM_TOPIC
+"C:\Users\%USERNAME%\AppData\Local\Programs\Python\Python312\python.exe" "%~dp0stream-service-tv.py" >> "%~dp0run-tv.log" 2>&1

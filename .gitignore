@@ -1,6 +1,8 @@
 run.bat
+run-tv.bat
 *.log
 stream-state.json
+stream-state-tv.json
 __pycache__/
 *.pyc
 .venv/
