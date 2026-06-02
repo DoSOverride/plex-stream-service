@@ -7,7 +7,7 @@ REM TAUTULLI_KEY (optional): from Tautulli > Settings > Web Interface > API. Ena
 REM   watch-aware pruning: stream-tagged movies you watched get deleted 7d after,
 REM   not the full 30d grace.
 set MDBLIST_KEY=REPLACE_WITH_YOUR_MDBLIST_API_KEY
-set TOPN=8
+set TOPN=10
 set NTFY_TOPIC=REPLACE_WITH_RANDOM_TOPIC
 set TAUTULLI_KEY=
 "C:\Users\%USERNAME%\AppData\Local\Programs\Python\Python312\python.exe" "%~dp0stream-service.py" >> "%~dp0run.log" 2>&1
