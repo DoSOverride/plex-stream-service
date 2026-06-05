@@ -77,10 +77,12 @@ def _plex_promote_collection(tok, sid, name):
         if c.get("title") == name: rk = c.get("ratingKey"); break
     if not rk:
         log(f"plex pin: collection '{name}' not in Plex yet"); return
-    url = f"{PLEX_BASE}/library/metadata/{rk}/prefs?promotedToOwnHome=1&promotedToSharedHome=1&X-Plex-Token={tok}"
+    # Home-row promotion uses hubs manage API (POST), not /library/metadata/{rk}/prefs
+    # which 400s on every run. Confirmed live: this POST returns 200.
+    url = f"{PLEX_BASE}/hubs/sections/{sid}/manage?metadataItemId={rk}&promotedToOwnHome=1&promotedToSharedHome=1&X-Plex-Token={tok}"
     if DRY: log(f"[dry] plex pin TV collection rk={rk}"); return
     try:
-        urllib.request.urlopen(urllib.request.Request(url, method="PUT"), timeout=15)
+        urllib.request.urlopen(urllib.request.Request(url, method="POST"), timeout=15)
         log(f"plex pin: '{name}' pinned to Home (rk={rk})")
     except Exception as e:
         log(f"WARN: plex pin failed: {e}")
@@ -114,7 +116,11 @@ def plex_collection_sync(charting_tvdbs):
             log(f"[dry] plex TV collection += ratingKey {rk}")
         else:
             try:
-                urllib.request.urlopen(urllib.request.Request(url, method="PUT"), timeout=30); synced += 1
+                with urllib.request.urlopen(urllib.request.Request(url, method="PUT"), timeout=30) as resp:
+                    if resp.status >= 300:
+                        log(f"WARN: plex tag rk={rk} returned HTTP {resp.status}")
+                    else:
+                        synced += 1
             except Exception as e:
                 log(f"WARN: plex tag rk={rk}: {e}")
     log(f"plex TV collection '{COLL_NAME}': {synced} charting series present in Plex")
@@ -165,11 +171,11 @@ def main():
     # Pick the root with the most free space each run
     MIN_FREE_GB = 25
     roots = [r for r in http(f"{SONARR}/rootfolder") if r.get("accessible", True)]
-    roots.sort(key=lambda r: r["freeSpace"], reverse=True)
+    roots.sort(key=lambda r: r.get("freeSpace", 0), reverse=True)
     if not roots:
         log("ABORT: no accessible root folders"); return
     chosen = roots[0]
-    chosen_path = chosen["path"]; free_gb = chosen["freeSpace"]/1e9
+    chosen_path = chosen["path"]; free_gb = chosen.get("freeSpace", 0)/1e9
     log(f"chose root {chosen_path} ({free_gb:.0f}GB free) from {len(roots)} candidates")
 
     # 3. ADD new charting series we don't already have
@@ -205,7 +211,11 @@ def main():
     # 4. STATE + GRACE-DELETE
     state = {}
     if os.path.exists(STATE_FILE):
-        state = json.load(open(STATE_FILE))
+        try:
+            with open(STATE_FILE) as f: state = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            log(f"WARN: state file unreadable ({e}); starting fresh -- grace-delete skipped this run")
+            state = {}
     now = datetime.datetime.now()
     for t in [str(x) for x in charting]:
         state[t] = now.isoformat()

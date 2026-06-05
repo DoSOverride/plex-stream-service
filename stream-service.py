@@ -85,10 +85,12 @@ def _plex_promote_collection(tok, sid, name):
         if c.get("title") == name: rk = c.get("ratingKey"); break
     if not rk:
         log(f"plex pin: collection '{name}' not in Plex yet -- will pin once it has titles"); return
-    url = f"{PLEX_BASE}/library/metadata/{rk}/prefs?promotedToOwnHome=1&promotedToSharedHome=1&X-Plex-Token={tok}"
+    # Home-row promotion uses the hubs manage API. The old /library/metadata/{rk}/prefs
+    # PUT returns HTTP 400 -- confirmed live. This POST returns 200 and sets promotedToOwnHome=1.
+    url = f"{PLEX_BASE}/hubs/sections/{sid}/manage?metadataItemId={rk}&promotedToOwnHome=1&promotedToSharedHome=1&X-Plex-Token={tok}"
     if DRY: log(f"[dry] plex pin collection rk={rk} -> Home"); return
     try:
-        urllib.request.urlopen(urllib.request.Request(url, method="PUT"), timeout=15)
+        urllib.request.urlopen(urllib.request.Request(url, method="POST"), timeout=15)
         log(f"plex pin: '{name}' pinned to Home (rk={rk})")
     except Exception as e:
         log(f"WARN: plex pin failed: {e}")
@@ -181,6 +183,8 @@ def main():
         for it in items:
             tmdb = (it.get("ids") or {}).get("tmdb") or it.get("id")
             if not tmdb: continue
+            try: tmdb = int(tmdb)   # normalize: Radarr tmdbId is int; avoids charting-miss -> wrong delete
+            except (ValueError, TypeError): continue
             c = charting.setdefault(tmdb, {"title": it.get("title"), "year": it.get("release_year"), "svcs": []})
             c["svcs"].append(svc)
         log(f"chart {svc}: {len(items)} titles")
@@ -193,7 +197,11 @@ def main():
         if DRY: tag_id = -1; log(f"[dry] would create tag '{TAG}'")
         else: tag_id = http(f"{RADARR}/tag", "POST", {"label": TAG})["id"]; log(f"created tag '{TAG}' id={tag_id}")
     profiles = http(f"{RADARR}/qualityprofile")
-    qp = next((p["id"] for p in profiles if re.search(r"1080", p["name"])), profiles[0]["id"])
+    if not profiles:
+        log("ABORT: no quality profiles in Radarr"); return
+    qp = next((p["id"] for p in profiles if re.search(r"\b1080p?\b|HD-1080", p["name"], re.I)), None)
+    if qp is None:
+        log(f"ABORT: no 1080p quality profile found (have: {[p['name'] for p in profiles]})"); return
     movies = http(f"{RADARR}/movie")
     by_tmdb = {m["tmdbId"]: m for m in movies}
 
@@ -202,11 +210,11 @@ def main():
     # if no root has the minimum free space.
     MIN_FREE_GB = 25
     roots = [r for r in http(f"{RADARR}/rootfolder") if r.get("accessible", True)]
-    roots.sort(key=lambda r: r["freeSpace"], reverse=True)
+    roots.sort(key=lambda r: r.get("freeSpace", 0), reverse=True)
     if not roots:
         log("ABORT: no accessible root folders"); return
     root = roots[0]
-    chosen_path = root["path"]; free_gb = root["freeSpace"]/1e9
+    chosen_path = root["path"]; free_gb = root.get("freeSpace", 0)/1e9
     log(f"chose root {chosen_path} ({free_gb:.0f}GB free) from {len(roots)} candidates")
 
     qp_720 = next((p["id"] for p in profiles if re.search(r"720", p["name"])), None)
@@ -243,7 +251,7 @@ def main():
                 added_dt = datetime.datetime.fromisoformat(m["added"].rstrip("Z"))
             except Exception:
                 continue
-            if (datetime.datetime.utcnow() - added_dt).days < QUALITY_FALLBACK_DAYS: continue
+            if (datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None) - added_dt).days < QUALITY_FALLBACK_DAYS: continue
             if DRY: log(f"[dry] FALLBACK {m['title']} 1080p -> 720p"); fallback_count += 1; continue
             try:
                 http(f"{RADARR}/movie/editor", "PUT",
@@ -259,7 +267,11 @@ def main():
     # 4. STATE + GRACE-DELETE (only movies tagged 'stream' = ones we added)
     state = {}
     if os.path.exists(STATE_FILE):
-        state = json.load(open(STATE_FILE))
+        try:
+            with open(STATE_FILE) as f: state = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            log(f"WARN: state file unreadable ({e}); starting fresh -- grace-delete skipped this run")
+            state = {}
     now = datetime.datetime.now()
     for t in [str(x) for x in charting]:
         state[t] = now.isoformat()
