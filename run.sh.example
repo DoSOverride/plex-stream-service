@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Copy to run.sh, chmod +x, fill in your MDBList key. Linux/macOS/Docker.
+# Radarr API key is auto-discovered from config.xml (/config, ~/.config/Radarr, ...)
+# or set RADARR_KEY / RADARR_CONFIG explicitly. Plex token: set PLEX_TOKEN, or it's
+# read from Preferences.xml automatically.
+set -euo pipefail
+export MDBLIST_KEY="REPLACE_WITH_YOUR_MDBLIST_API_KEY"
+export TOPN=10
+export NTFY_TOPIC="REPLACE_WITH_RANDOM_TOPIC"   # leave blank to skip push
+export TAUTULLI_KEY=""                            # optional: watch-aware pruning
+# export RADARR_URL="http://localhost:7878"      # override if not default
+# export RADARR_KEY="..."                         # override config.xml auto-read
+# export PLEX_TOKEN="..."                          # override Preferences.xml auto-read
+cd "$(dirname "$0")"
+exec python3 stream-service.py >> run.log 2>&1

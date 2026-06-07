@@ -1,6 +1,9 @@
 run.bat
 run-tv.bat
+run.sh
+run-tv.sh
 *.log
+*.log.*.gz
 stream-state.json
 stream-state-tv.json
 __pycache__/

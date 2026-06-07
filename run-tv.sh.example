@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Copy to run-tv.sh, chmod +x, fill in your MDBList key. Linux/macOS/Docker.
+# Sonarr API key auto-discovered from config.xml, or set SONARR_KEY / SONARR_CONFIG.
+set -euo pipefail
+export MDBLIST_KEY="REPLACE_WITH_YOUR_MDBLIST_API_KEY"
+export TOPN_TV=5
+export NTFY_TOPIC="REPLACE_WITH_RANDOM_TOPIC"   # leave blank to skip push
+# export SONARR_URL="http://localhost:8989"
+# export SONARR_KEY="..."
+# export PLEX_TOKEN="..."
+cd "$(dirname "$0")"
+exec python3 stream-service-tv.py >> run-tv.log 2>&1
