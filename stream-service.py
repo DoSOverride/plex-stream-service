@@ -194,8 +194,11 @@ def main():
             if not tmdb: continue
             try: tmdb = int(tmdb)   # normalize: Radarr tmdbId is int; avoids charting-miss -> wrong delete
             except (ValueError, TypeError): continue
-            rank = it.get("rank") or (i + 1)
-            pts = max(1, POOL_DEPTH - min(rank, POOL_DEPTH) + 1)
+            # Score by POSITION in this list's rank order (i), not the raw 'rank'
+            # value -- different MDBList lists use different rank scales (1-based
+            # position vs large global ranks), so position is the only reliable
+            # signal. Top of list = POOL_DEPTH pts, descending to 1.
+            pts = POOL_DEPTH - i
             e = scored.setdefault(tmdb, {"title": it.get("title"), "year": it.get("release_year"), "svcs": [], "score": 0})
             e["svcs"].append(svc); e["score"] += pts
         log(f"chart {svc}: {len(items)} titles pulled")
