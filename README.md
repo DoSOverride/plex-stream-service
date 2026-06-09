@@ -76,6 +76,8 @@ Edit the `LISTS` dict in either script to add/remove services or swap lists.
 - Python 3.10+ (stdlib only, no `pip install` needed)
 - [Radarr](https://radarr.video) on `http://localhost:7878` (for movies)
 - [Sonarr](https://sonarr.tv) on `http://localhost:8989` (for TV)
+- Some indexers wired into Radarr/Sonarr (via Prowlarr) so there's something to
+  download from — see [INDEXERS.md](INDEXERS.md) for the free public set this uses
 - A free [MDBList](https://mdblist.com) account for an API key
 - Plex Media Server (optional, only needed for collection sync + Home pinning)
 - A free [ntfy.sh](https://ntfy.sh) topic + phone app (optional, for push)
