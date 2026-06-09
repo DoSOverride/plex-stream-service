@@ -18,25 +18,30 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 RADARR = "http://localhost:7878/api/v3"
 ROOT = r"M:\media\Movies"
 TAG = "stream"
-GRACE_DAYS = 30
+# BULLETPROOF ROTATION: pull every service chart, merge into ONE global ranked
+# list, keep only the top KEEP_MOVIES. Two independent caps -- a count cap and a
+# byte backstop -- so the rotation can never grow without bound or fill a disk.
+KEEP_MOVIES   = int(os.environ.get("KEEP_MOVIES", "20"))   # hard count cap (the active rotation)
+POOL_DEPTH    = int(os.environ.get("TOPN", "15"))          # how deep to pull each service before merging
+STREAM_CAP_GB = float(os.environ.get("STREAM_CAP_GB", "165"))  # byte backstop: prune lowest-rank past this many GB
+GRACE_DAYS    = int(os.environ.get("GRACE_DAYS", "7"))     # delete this long after dropping out of the top KEEP_MOVIES
 STATE_FILE = os.path.join(HERE, "stream-state.json")
 LOG_FILE = os.path.join(HERE, "stream-service.log")
 
-# service -> (mdblist list id, how many top titles to keep)
-TOPN = int(os.environ.get("TOPN", "8"))   # per-service depth
+# service -> (mdblist list id, how deep to pull before merging)
 LISTS = {
-    "Netflix":    (61756, TOPN),
-    "Apple TV+":  (59152, TOPN),
-    "Paramount+": (58487, TOPN),
-    "HBO Max":    (171401, TOPN),
-    "Crave":      (165305, TOPN),
-    "Disney+":    (3095,  TOPN),   # Disney+ Movies by garycrawfordgc -- live, real-trending
+    "Netflix":    (61756, POOL_DEPTH),
+    "Apple TV+":  (59152, POOL_DEPTH),
+    "Paramount+": (58487, POOL_DEPTH),
+    "HBO Max":    (171401, POOL_DEPTH),
+    "Crave":      (165305, POOL_DEPTH),
+    "Disney+":    (3095,  POOL_DEPTH),   # Disney+ Movies by garycrawfordgc -- live, real-trending
 }
 # Prime Video deliberately excluded -- user already pays for Prime.
 QUALITY_FALLBACK_DAYS = 7   # if no grab after N days, drop 1080p -> 720p
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC")  # set in run.bat; if unset, push is no-op
 TAUTULLI_KEY = os.environ.get("TAUTULLI_KEY")  # optional; enables watch-aware pruning
-WATCHED_GRACE_DAYS = 7   # if user watched a stream-tagged title, drop grace from 30d -> this
+WATCHED_GRACE_DAYS = int(os.environ.get("WATCHED_GRACE_DAYS", "3"))  # delete this long after user finishes a stream title
 
 def log(m):
     line = f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} {m}"
@@ -172,23 +177,32 @@ def ntfy_push(added_titles):
         log(f"WARN: ntfy push failed: {e}")
 
 def main():
-    # 1. gather currently-charting movies (tmdb -> {title, year, services[]})
-    charting = {}
+    # 1. Pull every service chart, merge into ONE global ranked list, then keep
+    # only the top KEEP_MOVIES. Popularity score = sum across services of
+    # (POOL_DEPTH - rank + 1), so a #1 on one service scores high and a title
+    # charting on several services scores higher still. The capped set is the
+    # active rotation; everything tagged but outside it ages out via grace-delete.
+    scored = {}   # tmdb -> {title, year, svcs[], score}
     for svc, (lid, n) in LISTS.items():
         try:
             items = mdb(lid).get("movies", [])
         except Exception as e:
             log(f"WARN: list {svc} ({lid}) fetch failed: {e}"); continue
         items = sorted(items, key=lambda x: x.get("rank", 999))[:n]
-        for it in items:
+        for i, it in enumerate(items):
             tmdb = (it.get("ids") or {}).get("tmdb") or it.get("id")
             if not tmdb: continue
             try: tmdb = int(tmdb)   # normalize: Radarr tmdbId is int; avoids charting-miss -> wrong delete
             except (ValueError, TypeError): continue
-            c = charting.setdefault(tmdb, {"title": it.get("title"), "year": it.get("release_year"), "svcs": []})
-            c["svcs"].append(svc)
-        log(f"chart {svc}: {len(items)} titles")
-    log(f"total unique charting movies: {len(charting)}")
+            rank = it.get("rank") or (i + 1)
+            pts = max(1, POOL_DEPTH - min(rank, POOL_DEPTH) + 1)
+            e = scored.setdefault(tmdb, {"title": it.get("title"), "year": it.get("release_year"), "svcs": [], "score": 0})
+            e["svcs"].append(svc); e["score"] += pts
+        log(f"chart {svc}: {len(items)} titles pulled")
+    ranked = sorted(scored.items(), key=lambda kv: (-kv[1]["score"], kv[1]["title"] or ""))
+    charting = dict(ranked[:KEEP_MOVIES])   # the active rotation (hard count cap)
+    score_of = {t: v["score"] for t, v in scored.items()}
+    log(f"merged {len(scored)} unique titles across {len(LISTS)} services -> active rotation = top {len(charting)} (cap {KEEP_MOVIES})")
 
     # 2. Radarr state: tag id, existing movies
     tags = http(f"{RADARR}/tag")
@@ -276,29 +290,49 @@ def main():
     for t in [str(x) for x in charting]:
         state[t] = now.isoformat()
     watched = watched_tmdb_ids()   # tmdb_id -> last_watched_unix_ts
-    removed = 0
+    removed = 0; deleted_ids = set()
+    def _delete(m, reason):
+        nonlocal removed
+        if DRY: log(f"[dry] REMOVE {m['title']} ({reason})"); deleted_ids.add(m["id"]); removed += 1; return
+        try:
+            http(f"{RADARR}/movie/{m['id']}?deleteFiles=true&addImportExclusion=false", "DELETE")
+            log(f"REMOVED {m['title']} ({reason})")
+        except Exception as e:
+            log(f"DELFAIL {m['title']}: {e}"); return
+        deleted_ids.add(m["id"]); state.pop(str(m["tmdbId"]), None); removed += 1
     for m in movies:
         if tag_id not in m.get("tags", []): continue
         tmdb_i = m["tmdbId"]; tmdb = str(tmdb_i)
         if tmdb_i in charting: continue
         last = state.get(tmdb)
         age = (now - datetime.datetime.fromisoformat(last)).days if last else 999
-        # If user finished watching it, shorten grace: must be both >=7d since
-        # off-chart AND >=7d since watch, so a recent watch doesn't trigger.
+        # If user finished watching it, shorten grace: must be both >= WATCHED_GRACE_DAYS
+        # since dropping out of the rotation AND since the watch, so a recent watch
+        # of something still trending doesn't trigger.
         if tmdb_i in watched:
             watch_age = (now.timestamp() - watched[tmdb_i]) / 86400
             if age < WATCHED_GRACE_DAYS or watch_age < WATCHED_GRACE_DAYS: continue
-            reason = f"watched {watch_age:.0f}d ago, off-chart {age}d"
-            do_remove = True
-        else:
-            do_remove = age >= GRACE_DAYS
-            reason = f"off-chart {age}d"
-        if do_remove:
-            if DRY: log(f"[dry] REMOVE {m['title']} ({reason})")
-            else:
-                try: http(f"{RADARR}/movie/{m['id']}?deleteFiles=true&addImportExclusion=false", "DELETE"); log(f"REMOVED {m['title']} ({reason})")
-                except Exception as e: log(f"DELFAIL {m['title']}: {e}"); continue
-            state.pop(tmdb, None); removed += 1
+            _delete(m, f"watched {watch_age:.0f}d ago, off-rotation {age}d")
+        elif age >= GRACE_DAYS:
+            _delete(m, f"off-rotation {age}d")
+
+    # 4b. BYTE BACKSTOP: even within the count cap, if the stream-tagged footprint
+    # still exceeds STREAM_CAP_GB, prune lowest-priority titles until under.
+    # Order: titles already out of the active rotation first, then lowest popularity
+    # score -- so the most-trending titles are the last things ever touched. Disk
+    # cannot fill regardless of how big individual releases turn out to be.
+    survivors = [m for m in movies
+                 if tag_id in m.get("tags", []) and m["id"] not in deleted_ids and m.get("movieFileId", 0) > 0]
+    total_gb = sum((m.get("movieFile") or {}).get("size", 0) for m in survivors) / 1e9
+    if total_gb > STREAM_CAP_GB:
+        log(f"BYTE BACKSTOP: stream footprint {total_gb:.0f}GB > cap {STREAM_CAP_GB:.0f}GB -- pruning")
+        survivors.sort(key=lambda m: (m["tmdbId"] in charting, score_of.get(m["tmdbId"], 0),
+                                      -(m.get("movieFile") or {}).get("size", 0)))
+        for m in survivors:
+            if total_gb <= STREAM_CAP_GB: break
+            sz = (m.get("movieFile") or {}).get("size", 0) / 1e9
+            _delete(m, f"byte backstop, {sz:.1f}GB, footprint {total_gb:.0f}GB")
+            total_gb -= sz
 
     if not DRY:
         json.dump(state, open(STATE_FILE, "w"), indent=1)

@@ -4,10 +4,22 @@ REM Radarr API key is auto-read from C:\ProgramData\Radarr\config.xml -- overrid
 REM with `set RADARR_KEY=...` if Radarr lives elsewhere.
 REM NTFY_TOPIC: pick a random hard-to-guess string, then subscribe at https://ntfy.sh/<your_topic> on phone.
 REM TAUTULLI_KEY (optional): from Tautulli > Settings > Web Interface > API. Enables
-REM   watch-aware pruning: stream-tagged movies you watched get deleted 7d after,
-REM   not the full 30d grace.
+REM   watch-aware pruning: stream-tagged movies you watched get deleted
+REM   WATCHED_GRACE_DAYS after, instead of waiting out the full off-rotation grace.
+REM
+REM Rotation is a hard-capped ranked list: all service charts are merged into one
+REM ranked list and only the top KEEP_MOVIES are kept (the active rotation).
+REM   TOPN              = how deep to pull each service before merging (pool depth)
+REM   KEEP_MOVIES       = hard count cap (size of the active rotation)
+REM   STREAM_CAP_GB     = byte backstop; prune lowest-rank titles past this footprint
+REM   GRACE_DAYS        = delete this long after a title drops out of the top KEEP_MOVIES
+REM   WATCHED_GRACE_DAYS= delete this long after you finish watching a stream title
 set MDBLIST_KEY=REPLACE_WITH_YOUR_MDBLIST_API_KEY
-set TOPN=10
+set TOPN=15
+set KEEP_MOVIES=20
+set STREAM_CAP_GB=165
+set GRACE_DAYS=7
+set WATCHED_GRACE_DAYS=3
 set NTFY_TOPIC=REPLACE_WITH_RANDOM_TOPIC
 set TAUTULLI_KEY=
 "C:\Users\%USERNAME%\AppData\Local\Programs\Python\Python312\python.exe" "%~dp0stream-service.py" >> "%~dp0run.log" 2>&1

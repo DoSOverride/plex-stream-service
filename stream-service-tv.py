@@ -17,19 +17,28 @@ SONARR_KEY = _sonarr_key()
 HERE = os.path.dirname(os.path.abspath(__file__))
 SONARR = "http://localhost:8989/api/v3"
 TAG = "stream-tv"
-GRACE_DAYS = 30
+# BULLETPROOF ROTATION (TV): pull every service chart, merge into ONE global
+# ranked list, keep only the top KEEP_SHOWS. Count cap + byte backstop, so the
+# TV rotation can't grow without bound. Shows are big (whole seasons) -- the cap
+# is kept low and uses latestSeason-only so a trending show can't drag in a
+# huge back catalogue. No watched-accelerate on TV: deleting a show because one
+# episode was watched risks nuking a mid-binge; off-rotation grace + byte cap
+# handle space instead.
+KEEP_SHOWS    = int(os.environ.get("KEEP_SHOWS", "6"))     # hard count cap (active rotation)
+POOL_DEPTH    = int(os.environ.get("TOPN_TV", os.environ.get("TOPN", "15")))  # depth pulled per service before merging
+STREAM_CAP_GB = float(os.environ.get("STREAM_TV_CAP_GB", "60"))  # byte backstop: prune lowest-rank past this many GB
+GRACE_DAYS    = int(os.environ.get("GRACE_DAYS", "7"))     # delete this long after dropping out of the top KEEP_SHOWS
 STATE_FILE = os.path.join(HERE, "stream-state-tv.json")
 LOG_FILE = os.path.join(HERE, "stream-service-tv.log")
 
-TOPN = int(os.environ.get("TOPN_TV", os.environ.get("TOPN", "8")))
 # MDBList show lists -- shows that are actually trending on each service right
 # now (rank-ordered). Curated by garycrawfordgc + adamosborne01.
 LISTS = {
-    "Netflix":    (3082,  TOPN),
-    "HBO Max":    (3086,  TOPN),
-    "Disney+":    (3090,  TOPN),
-    "Apple TV+":  (7995,  TOPN),
-    "Paramount+": (32020, TOPN),
+    "Netflix":    (3082,  POOL_DEPTH),
+    "HBO Max":    (3086,  POOL_DEPTH),
+    "Disney+":    (3090,  POOL_DEPTH),
+    "Apple TV+":  (7995,  POOL_DEPTH),
+    "Paramount+": (32020, POOL_DEPTH),
 }
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC")
 
@@ -141,21 +150,29 @@ def ntfy_push(added_titles):
         log(f"WARN: ntfy push failed: {e}")
 
 def main():
-    # 1. gather currently-charting shows (tvdb -> {title, year, services[]})
-    charting = {}
+    # 1. Pull every service chart, merge into ONE global ranked list, keep only
+    # the top KEEP_SHOWS. Score = sum across services of (POOL_DEPTH - rank + 1).
+    scored = {}   # tvdb -> {title, year, svcs[], score}
     for svc, (lid, n) in LISTS.items():
         try:
             items = mdb(lid).get("shows", [])
         except Exception as e:
             log(f"WARN: list {svc} ({lid}) fetch failed: {e}"); continue
         items = sorted(items, key=lambda x: x.get("rank", 999))[:n]
-        for it in items:
+        for i, it in enumerate(items):
             tvdb = (it.get("ids") or {}).get("tvdb")
             if not tvdb: continue
-            c = charting.setdefault(tvdb, {"title": it.get("title"), "year": it.get("release_year"), "svcs": []})
-            c["svcs"].append(svc)
-        log(f"chart {svc}: {len(items)} series")
-    log(f"total unique charting series: {len(charting)}")
+            try: tvdb = int(tvdb)
+            except (ValueError, TypeError): continue
+            rank = it.get("rank") or (i + 1)
+            pts = max(1, POOL_DEPTH - min(rank, POOL_DEPTH) + 1)
+            e = scored.setdefault(tvdb, {"title": it.get("title"), "year": it.get("release_year"), "svcs": [], "score": 0})
+            e["svcs"].append(svc); e["score"] += pts
+        log(f"chart {svc}: {len(items)} series pulled")
+    ranked = sorted(scored.items(), key=lambda kv: (-kv[1]["score"], kv[1]["title"] or ""))
+    charting = dict(ranked[:KEEP_SHOWS])   # active rotation (hard count cap)
+    score_of = {t: v["score"] for t, v in scored.items()}
+    log(f"merged {len(scored)} unique series across {len(LISTS)} services -> active rotation = top {len(charting)} (cap {KEEP_SHOWS})")
 
     # 2. Sonarr state
     tags = http(f"{SONARR}/tag")
@@ -219,19 +236,39 @@ def main():
     now = datetime.datetime.now()
     for t in [str(x) for x in charting]:
         state[t] = now.isoformat()
-    removed = 0
+    removed = 0; deleted_ids = set()
+    def _delete(s, reason):
+        nonlocal removed
+        if DRY: log(f"[dry] REMOVE {s['title']} ({reason})"); deleted_ids.add(s["id"]); removed += 1; return
+        try:
+            http(f"{SONARR}/series/{s['id']}?deleteFiles=true&addImportListExclusion=false", "DELETE")
+            log(f"REMOVED {s['title']} ({reason})")
+        except Exception as e:
+            log(f"DELFAIL {s['title']}: {e}"); return
+        deleted_ids.add(s["id"]); state.pop(str(s["tvdbId"]), None); removed += 1
     for s in series:
         if tag_id not in s.get("tags", []): continue
-        tvdb = str(s["tvdbId"])
-        if int(tvdb) in charting: continue
-        last = state.get(tvdb)
+        if s["tvdbId"] in charting: continue
+        last = state.get(str(s["tvdbId"]))
         age = (now - datetime.datetime.fromisoformat(last)).days if last else 999
         if age >= GRACE_DAYS:
-            if DRY: log(f"[dry] REMOVE {s['title']} (off-chart {age}d)")
-            else:
-                try: http(f"{SONARR}/series/{s['id']}?deleteFiles=true&addImportListExclusion=false", "DELETE"); log(f"REMOVED {s['title']} (off-chart {age}d)")
-                except Exception as e: log(f"DELFAIL {s['title']}: {e}"); continue
-            state.pop(tvdb, None); removed += 1
+            _delete(s, f"off-rotation {age}d")
+
+    # 4b. BYTE BACKSTOP: if the stream-tagged footprint still exceeds STREAM_CAP_GB,
+    # prune lowest-priority shows (out-of-rotation first, then lowest score) until
+    # under. Guarantees TV can never blow the disk no matter how big seasons are.
+    survivors = [s for s in series if tag_id in s.get("tags", []) and s["id"] not in deleted_ids]
+    def _size(s): return (s.get("statistics") or {}).get("sizeOnDisk", 0)
+    total_gb = sum(_size(s) for s in survivors) / 1e9
+    if total_gb > STREAM_CAP_GB:
+        log(f"BYTE BACKSTOP: TV footprint {total_gb:.0f}GB > cap {STREAM_CAP_GB:.0f}GB -- pruning")
+        survivors.sort(key=lambda s: (s["tvdbId"] in charting, score_of.get(s["tvdbId"], 0), -_size(s)))
+        for s in survivors:
+            if total_gb <= STREAM_CAP_GB: break
+            sz = _size(s) / 1e9
+            if sz <= 0: continue
+            _delete(s, f"byte backstop, {sz:.1f}GB, footprint {total_gb:.0f}GB")
+            total_gb -= sz
 
     if not DRY:
         json.dump(state, open(STATE_FILE, "w"), indent=1)

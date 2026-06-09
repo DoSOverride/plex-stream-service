@@ -3,8 +3,8 @@
 A tiny "mini Netflix" for Plex: auto-downloads what's currently trending on
 Netflix / Apple TV+ / Paramount+ / HBO Max / Crave / Disney+ into Radarr
 (movies) and Sonarr (TV), drops them into self-refreshing **🔥 Streaming
-Top 10** Plex rows, and auto-deletes them 30 days after they fall off every
-chart.
+Top 10** Plex rows, and rotates them out as they fall off the charts — with
+hard caps so the rotation can never grow without bound or fill a disk.
 
 Two stdlib-only Python scripts. No Docker. No Maintainerr. No `pip install`.
 
@@ -17,12 +17,20 @@ Two scripts, same shape:
 
 On every run, each one:
 
-1. Pulls the current Top-N chart for each streaming service via
-   [MDBList](https://mdblist.com) public lists.
-2. Adds anything not already present to Radarr/Sonarr at 1080p, tagged
-   `stream` / `stream-tv`, and starts the indexer search.
-3. Records "last seen on a chart" per title. Anything tagged that has been
-   off **every** chart for 30+ days is deleted (files + library entry).
+1. Pulls each streaming service chart via [MDBList](https://mdblist.com) public
+   lists, then **merges them into one global ranked list** (a title scores
+   higher the higher it ranks and the more services it charts on) and keeps only
+   the top `KEEP_MOVIES` / `KEEP_SHOWS` — that capped set is the active rotation.
+2. Adds anything in the rotation not already present to Radarr/Sonarr at 1080p,
+   tagged `stream` / `stream-tv`, and starts the indexer search.
+3. Rotates the rest out, with **two independent caps so it stays bounded**:
+   - **Count cap** — anything tagged that has dropped out of the top
+     `KEEP_MOVIES` / `KEEP_SHOWS` for `GRACE_DAYS` is deleted (files + entry).
+     Movies you've actually watched (via Tautulli) go after `WATCHED_GRACE_DAYS`
+     instead.
+   - **Byte backstop** — if the tagged footprint still exceeds `STREAM_CAP_GB`
+     (`STREAM_TV_CAP_GB` for TV), it prunes lowest-rank titles until under,
+     touching the most-trending titles last. Disk can't fill, ever.
 4. Picks whichever root folder has the most free space each run (so it
    spreads across drives instead of filling one).
 5. (Movies only) If a 1080p title still has no file after 7 days, drops it to
@@ -80,10 +88,13 @@ Edit the `LISTS` dict in either script to add/remove services or swap lists.
    - `NTFY_TOPIC` — any random hard-to-guess string (e.g. `plex-stream-yourname-abc123`).
      Then on your phone install ntfy from the App Store / Play Store and
      subscribe to that exact topic name. Leave blank to skip notifications.
-4. Open each script and tweak if desired:
-   - `LISTS` — which streaming services to track
-   - `TOPN` / `TOPN_TV` — depth per service (default 8 movies / 5 TV)
-   - `GRACE_DAYS` — how long off-chart titles stick around (default 30)
+4. Tweak the knobs (env vars in the `.bat`, or defaults in the script):
+   - `LISTS` — which streaming services to track (edit the dict in the script)
+   - `TOPN` / `TOPN_TV` — how deep to pull each service before merging (default 15)
+   - `KEEP_MOVIES` / `KEEP_SHOWS` — hard count cap = size of the rotation (default 20 / 6)
+   - `STREAM_CAP_GB` / `STREAM_TV_CAP_GB` — byte backstop footprint (default 165 / 60)
+   - `GRACE_DAYS` — how long off-rotation titles stick around (default 7)
+   - `WATCHED_GRACE_DAYS` — movies only, post-watch delete delay (default 3)
    - `QUALITY_FALLBACK_DAYS` — movies only (default 7)
 5. Schedule them. Task Scheduler → daily, actions: `run.bat` and `run-tv.bat`.
 
@@ -111,8 +122,12 @@ downloads keep going, grace deletes keep running). Tune `MIN_FREE_GB` in
 
 ## Notes
 
-- Radarr/Sonarr's own "remove from list when off-list" deletes instantly.
-  These scripts exist because you want a grace period.
+- Radarr/Sonarr's own "remove from list when off-list" deletes instantly and
+  is per-list with no global cap. These scripts exist because you want a grace
+  period **and** a hard ceiling on how much the rotation can ever occupy.
+- TV deliberately has no watch-accelerated delete: removing a show because you
+  watched one episode would risk nuking something you're mid-binge. Shows rotate
+  out on the off-rotation grace + byte backstop only.
 - The Plex collection gets pinned to the Home row automatically — no manual
   step required.
 - TV series add with `monitor: latestSeason` so a trending Ted Lasso doesn't

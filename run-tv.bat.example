@@ -3,7 +3,18 @@ REM Copy this to run-tv.bat and fill in your MDBList API key (https://mdblist.co
 REM Sonarr API key is auto-read from C:\ProgramData\Sonarr\config.xml -- override
 REM with `set SONARR_KEY=...` if Sonarr lives elsewhere.
 REM NTFY_TOPIC: pick a random hard-to-guess string, then subscribe at https://ntfy.sh/<your_topic> on phone.
+REM
+REM Rotation is a hard-capped ranked list: all service charts are merged and only
+REM the top KEEP_SHOWS are kept. Shows are big (whole seasons) so the cap is low
+REM and uses latestSeason-only. No watched-accelerate on TV (avoids nuking a binge).
+REM   TOPN_TV          = how deep to pull each service before merging (pool depth)
+REM   KEEP_SHOWS       = hard count cap (size of the active rotation)
+REM   STREAM_TV_CAP_GB = byte backstop; prune lowest-rank shows past this footprint
+REM   GRACE_DAYS       = delete this long after a show drops out of the top KEEP_SHOWS
 set MDBLIST_KEY=REPLACE_WITH_YOUR_MDBLIST_API_KEY
-set TOPN_TV=5
+set TOPN_TV=15
+set KEEP_SHOWS=6
+set STREAM_TV_CAP_GB=60
+set GRACE_DAYS=7
 set NTFY_TOPIC=REPLACE_WITH_RANDOM_TOPIC
 "C:\Users\%USERNAME%\AppData\Local\Programs\Python\Python312\python.exe" "%~dp0stream-service-tv.py" >> "%~dp0run-tv.log" 2>&1
