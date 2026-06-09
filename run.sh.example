@@ -1,0 +1,27 @@
+#!/bin/bash
+# Copy this to run.sh and fill in your MDBList API key (https://mdblist.com).
+# macOS / Linux launcher. Radarr API key is auto-read from the platform's
+# Radarr config.xml (macOS: ~/Library/Application Support/Radarr, Linux:
+# ~/.config/Radarr or /var/lib/radarr) -- override with RADARR_KEY=... if needed.
+#
+# PLEX_MOVIES_SID: your Plex "Movies" library section id (default 1). Find it in
+#   the Plex web URL when viewing the library, e.g. .../library/sections/5 -> "5".
+# PLEX_TOKEN (optional): auto-read from Plex on macOS/Windows; set explicitly on
+#   Linux/headless. NTFY_TOPIC: random hard-to-guess string, subscribe at
+#   https://ntfy.sh/<topic> on phone. TAUTULLI_KEY (optional): watch-aware pruning.
+#
+# DRY_RUN=1 logs every add/remove it WOULD do without touching anything. Set to 0 to go live.
+export DRY_RUN=1
+export MDBLIST_KEY=REPLACE_WITH_YOUR_MDBLIST_API_KEY
+export PLEX_MOVIES_SID=1
+export TOPN=15
+export KEEP_MOVIES=20
+export STREAM_CAP_GB=165
+export GRACE_DAYS=7
+export WATCHED_GRACE_DAYS=3
+export NTFY_TOPIC=REPLACE_WITH_RANDOM_TOPIC
+# export RADARR_KEY=...          # only if auto-detect fails
+# export PLEX_TOKEN=...          # only if auto-detect fails (Linux/headless)
+# export TAUTULLI_KEY=...
+cd "$(dirname "$0")"
+exec python3 stream-service.py >> run.log 2>&1

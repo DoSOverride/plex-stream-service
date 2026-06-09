@@ -8,11 +8,24 @@ except Exception: pass
 
 DRY = os.environ.get("DRY_RUN", "0") == "1"
 MDB_KEY = os.environ["MDBLIST_KEY"]
+def _arr_config_paths(app):
+    home = os.path.expanduser("~")
+    return [
+        r"C:\\ProgramData\\%s\\config.xml" % app,
+        os.path.join(home, "Library", "Application Support", app, "config.xml"),  # macOS
+        os.path.join(home, ".config", app, "config.xml"),                          # Linux / some macOS
+        "/var/lib/%s/config.xml" % app.lower(),                                    # Linux service
+    ]
+
 def _sonarr_key():
     k = os.environ.get("SONARR_KEY")
     if k: return k
-    cfg = open(r"C:\ProgramData\Sonarr\config.xml", encoding="utf-8").read()
-    return re.search(r"<ApiKey>(.*?)</ApiKey>", cfg).group(1)
+    for _p in _arr_config_paths("Sonarr"):
+        if os.path.exists(_p):
+            cfg = open(_p, encoding="utf-8").read()
+            m = re.search(r"<ApiKey>(.*?)</ApiKey>", cfg)
+            if m: return m.group(1)
+    raise SystemExit("SONARR_KEY not set and no Sonarr config.xml found")
 SONARR_KEY = _sonarr_key()
 HERE = os.path.dirname(os.path.abspath(__file__))
 SONARR = "http://localhost:8989/api/v3"
@@ -44,7 +57,7 @@ NTFY_TOPIC = os.environ.get("NTFY_TOPIC")
 
 PLEX_BASE = "http://localhost:32400"
 COLL_NAME = "\U0001f525 Streaming Top 10 TV"
-PLEX_TV_SID = "2"
+PLEX_TV_SID = os.environ.get("PLEX_TV_SID", "2")
 
 def log(m):
     line = f"{datetime.datetime.now():%Y-%m-%d %H:%M:%S} {m}"
@@ -67,12 +80,37 @@ def mdb(list_id):
         return json.loads(r.read().decode())
 
 def plex_token():
+    t = os.environ.get("PLEX_TOKEN")
+    if t: return t
+    # Windows registry
     try:
         import winreg
         k = winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Plex, Inc.\Plex Media Server")
         return winreg.QueryValueEx(k, "PlexOnlineToken")[0]
-    except Exception as e:
-        log(f"WARN: no Plex token: {e}"); return None
+    except Exception:
+        pass
+    # macOS preferences
+    try:
+        import subprocess
+        out = subprocess.check_output(
+            ["defaults", "read", "com.plexapp.plexmediaserver", "PlexOnlineToken"],
+            text=True, stderr=subprocess.DEVNULL).strip()
+        if out: return out
+    except Exception:
+        pass
+    # macOS/Linux Preferences.xml fallback
+    try:
+        for p in (
+            os.path.expanduser("~/Library/Application Support/Plex Media Server/Preferences.xml"),
+            os.path.expanduser("~/.config/Plex Media Server/Preferences.xml"),
+            "/var/lib/plexmediaserver/Library/Application Support/Plex Media Server/Preferences.xml",
+        ):
+            if os.path.exists(p):
+                m = re.search(r'PlexOnlineToken="([^"]+)"', open(p, encoding="utf-8").read())
+                if m: return m.group(1)
+    except Exception:
+        pass
+    log("WARN: no Plex token found (set PLEX_TOKEN)"); return None
 
 def _plex_promote_collection(tok, sid, name):
     import xml.etree.ElementTree as ET

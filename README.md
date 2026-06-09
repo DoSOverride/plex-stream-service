@@ -71,7 +71,8 @@ Edit the `LISTS` dict in either script to add/remove services or swap lists.
 
 ## Requirements
 
-- Windows (paths are Windows-flavored — easy to port to Linux)
+- **Windows, macOS, or Linux** — cross-platform. Plex token + Radarr/Sonarr
+  `config.xml` are auto-detected per OS; Plex section ids are env-configurable.
 - Python 3.10+ (stdlib only, no `pip install` needed)
 - [Radarr](https://radarr.video) on `http://localhost:7878` (for movies)
 - [Sonarr](https://sonarr.tv) on `http://localhost:8989` (for TV)
@@ -98,9 +99,28 @@ Edit the `LISTS` dict in either script to add/remove services or swap lists.
    - `QUALITY_FALLBACK_DAYS` — movies only (default 7)
 5. Schedule them. Task Scheduler → daily, actions: `run.bat` and `run-tv.bat`.
 
-The scripts read Radarr/Sonarr API keys directly from
-`C:\ProgramData\Radarr\config.xml` and `C:\ProgramData\Sonarr\config.xml`.
-If yours live elsewhere, set `RADARR_KEY=...` / `SONARR_KEY=...` in the bat.
+### macOS / Linux
+
+1. Clone the repo, e.g. `~/.local/share/plex-stream-service`.
+2. `cp run.sh.example run.sh` and `cp run-tv.sh.example run-tv.sh`; `chmod +x run*.sh`.
+3. Fill in `MDBLIST_KEY`, and set your Plex section ids:
+   - `PLEX_MOVIES_SID` (movies) and `PLEX_TV_SID` (TV) — the number in the Plex
+     web URL when viewing each library, e.g. `.../library/sections/5` → `5`.
+     Defaults are `1` / `2`.
+4. API keys auto-read from the platform config.xml (macOS:
+   `~/Library/Application Support/{Radarr,Sonarr}/config.xml`, Linux:
+   `~/.config/...` or `/var/lib/...`); override with `RADARR_KEY` / `SONARR_KEY`.
+   Plex token auto-reads from Plex on macOS; set `PLEX_TOKEN` on headless Linux.
+5. Schedule with cron, e.g. daily at 5am:
+   ```
+   0 5 * * * /path/to/run.sh
+   15 5 * * * /path/to/run-tv.sh
+   ```
+   (or a launchd LaunchAgent on macOS).
+
+The scripts auto-detect the Radarr/Sonarr `config.xml` for your OS (Windows
+`C:\ProgramData\...`, macOS `~/Library/Application Support/...`, Linux
+`~/.config/...` or `/var/lib/...`). Override with `RADARR_KEY=...` / `SONARR_KEY=...`.
 
 ## Dry run
 

@@ -1,0 +1,19 @@
+#!/bin/bash
+# Copy this to run-tv.sh and fill in your MDBList API key (https://mdblist.com).
+# macOS / Linux launcher for the TV (Sonarr) side.
+# Sonarr API key auto-read from the platform's Sonarr config.xml -- override with SONARR_KEY=...
+# PLEX_TV_SID: your Plex "TV Shows" section id (default 2). See run.sh.example for how to find it.
+#
+# DRY_RUN=1 logs what it WOULD do without touching anything. Set to 0 to go live.
+export DRY_RUN=1
+export MDBLIST_KEY=REPLACE_WITH_YOUR_MDBLIST_API_KEY
+export PLEX_TV_SID=2
+export TOPN_TV=15
+export KEEP_SHOWS=6
+export STREAM_TV_CAP_GB=60
+export GRACE_DAYS=7
+export NTFY_TOPIC=REPLACE_WITH_RANDOM_TOPIC
+# export SONARR_KEY=...
+# export PLEX_TOKEN=...
+cd "$(dirname "$0")"
+exec python3 stream-service-tv.py >> run-tv.log 2>&1
