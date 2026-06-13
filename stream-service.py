@@ -171,6 +171,28 @@ def plex_collection_sync(charting):
     log(f"plex collection '{COLL_NAME}': {synced} charting titles present in Plex")
     _plex_promote_collection(tok, PLEX_MOVIES_SID, COLL_NAME)
 
+def _plex_rk_to_tmdb():
+    """Map Plex movie ratingKey -> tmdbId for the movies section. Needed because
+    Tautulli history rows carry plex:// guids, not tmdb:// -- so the watch-prune
+    matched nothing until we resolve ratingKey -> tmdb here."""
+    tok = plex_token()
+    if not tok: return {}
+    import xml.etree.ElementTree as ET
+    out = {}
+    try:
+        with urllib.request.urlopen(f"{PLEX_BASE}/library/sections/{PLEX_MOVIES_SID}/all?includeGuids=1&X-Plex-Token={tok}", timeout=60) as r:
+            root = ET.fromstring(r.read())
+        for v in root.findall("Video"):
+            rk = v.get("ratingKey")
+            for g in v.findall("Guid"):
+                gid = g.get("id", "")
+                if gid.startswith("tmdb://"):
+                    try: out[rk] = int(gid[7:])
+                    except ValueError: pass
+    except Exception as e:
+        log(f"WARN: plex rk->tmdb map failed: {e}")
+    return out
+
 def watched_tmdb_ids():
     """Return {tmdb_id: last_watched_unix_ts} for all fully-watched movies
     in Tautulli history. Used to accelerate grace-delete on stream-tagged
@@ -181,17 +203,21 @@ def watched_tmdb_ids():
         with urllib.request.urlopen(url, timeout=30) as r:
             d = json.loads(r.read().decode())
         rows = d.get("response", {}).get("data", {}).get("data", [])
+        rk2tmdb = _plex_rk_to_tmdb()   # resolve plex:// history rows -> tmdb
         out = {}
         for r in rows:
             if r.get("watched_status") != 1: continue
-            guid = r.get("guid", "") or ""
-            m = re.search(r"tmdb://(\d+)", guid)
-            if not m: continue
-            tmdb = int(m.group(1))
+            tmdb = None
+            m = re.search(r"tmdb://(\d+)", r.get("guid", "") or "")
+            if m:
+                tmdb = int(m.group(1))
+            elif r.get("rating_key") is not None:
+                tmdb = rk2tmdb.get(str(r.get("rating_key")))
+            if not tmdb: continue
             ts = r.get("stopped") or r.get("started") or 0
             if tmdb not in out or ts > out[tmdb]:
                 out[tmdb] = ts
-        log(f"tautulli: {len(out)} watched movies in last 500 history rows")
+        log(f"tautulli: {len(out)} watched movies resolved (of {len(rows)} history rows; rk-map={len(rk2tmdb)})")
         return out
     except Exception as e:
         log(f"WARN: tautulli fetch failed: {e}"); return {}
